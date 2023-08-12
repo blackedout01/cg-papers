@@ -243,7 +243,7 @@ static void MyAudioCallback(void *Userdata, Uint8 *Stream, int Len) {
     Audio->SamplesDone += SampleCount;
 }
 
-int main(void) {
+int main(int, char **) {
     if(SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return -1;

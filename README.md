@@ -1,5 +1,5 @@
 ## Download
-`git clone --recursive https://github.com/blackedout01/sdl-gl-template.git`
+`git clone --recursive https://github.com/blackedout01/cg-papers.git`
 <br/>or if already cloned without `--recursive`:
 <br/>`git submodule update --init`
 
