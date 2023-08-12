@@ -2,3 +2,6 @@
 	path = SDL
 	url = https://github.com/libsdl-org/SDL.git
 	branch = SDL2
+[submodule "eigen"]
+	path = eigen
+	url = https://gitlab.com/libeigen/eigen.git

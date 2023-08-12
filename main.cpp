@@ -1,7 +1,10 @@
 #include <stdio.h>
 #include <math.h>
+#include "Eigen/Dense"
 #include "SDL.h"
 #include "glad/glad.h"
+
+#include <iostream>
 
 #define ArrayCount(X) (sizeof(X)/sizeof(*X))
 
@@ -23,30 +26,6 @@
 #ifndef GL_TABLE_TOO_LARGE1
 #define GL_TABLE_TOO_LARGE1 0x8031
 #endif
-
-static const char *CodeVS =
-"#version 410 core\n"
-"layout(location=0) in vec3 P;"
-"layout(location=1) in vec3 C;"
-"out vec3 FragC;"
-"out vec3 FragP;"
-"uniform vec2 ModelP;"
-"void main() {"
-"   FragP = P + vec3(ModelP, 0.0f);"
-"   FragC = C;"
-"   gl_Position = vec4(FragP, 1.0);"
-"}"
-;
-
-static const char *CodeFS =
-"#version 410 core\n"
-"in vec3 FragC;"
-"in vec3 FragP;"
-"out vec4 Result;"
-"void main() {"
-"   Result = vec4(FragC, 1.0);"
-"}"
-;
 
 static const char *ErrorStringOpenGL(GLenum Error) {
     switch(Error) {
@@ -94,11 +73,81 @@ static void CheckOpenGL(const char *CallStr) {
 // NOTE(blackedout): Do NOT call this function as part of a single statement if, while, etc.
 #define glCheck(X) X; do { CheckOpenGL(#X); } while(0)
 
-static GLfloat MeshData[] = {
-     0.5f,  0.5f, 0.0f, 1.0f, 0.0f, 0.0f,
-    -0.5f,  0.5f, 0.0f, 1.0f, 1.0f, 0.0f,
-     0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 1.0f,
-    -0.5f, -0.5f, 0.0f, 0.0f, 1.0f, 0.0f,
+typedef Eigen::Vector2f v2;
+typedef Eigen::Vector3f v3;
+typedef Eigen::Matrix2f m2;
+typedef Eigen::Matrix3f m3;
+
+static m2 Rotation(float Angle) {
+    v2 X(cosf(Angle), sinf(Angle));
+    v2 Y(-sinf(Angle), cosf(Angle));
+    
+    m2 R;
+    R << X, Y;
+    return R;
+}
+
+static m3 RotationX(float Angle) {
+    float C = cosf(Angle);
+    float S = sinf(Angle);
+    v3 X(1.0f, 0.0f, 0.0f);
+    v3 Y(0.0f, C, S);
+    v3 Z(0.0f, -S, C);
+    
+    m3 R;
+    R << X, Y, Z;
+    return R;
+}
+
+static m3 RotationY(float Angle) {
+    float C = cosf(Angle);
+    float S = sinf(Angle);
+    v3 X(C, 0.0f, -S);
+    v3 Y(0.0f, 1.0f, 0.0f);
+    v3 Z(S, 0.0f, C);
+    
+    m3 R;
+    R << X, Y, Z;
+    return R;
+}
+
+static m3 RotationZ(float Angle) {
+    float C = cosf(Angle);
+    float S = sinf(Angle);
+    v3 X(C, S, 0.0f);
+    v3 Y(-S, C, 0.0f);
+    v3 Z(0.0f, 0.0f, 1.0f);
+    
+    m3 R;
+    R << X, Y, Z;
+    return R;
+}
+
+struct vertex {
+    v3 Position;
+    v3 Color;
+};
+
+static char *ReadFile(const char *FileName) {
+    FILE *File = fopen(FileName, "r");
+    fseek(File, 0, SEEK_END);
+    long int FileSize = ftell(File);
+    fseek(File, 0, SEEK_SET);
+    
+    char *Bytes = (char *)malloc(FileSize + 1);
+    Bytes[FileSize] = 0;
+    fread(Bytes, FileSize, 1, File);
+    return Bytes;
+}
+
+static vertex MeshData[] = {
+    { { 0.5f,  0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
+    { { -0.5f,  0.5f, 0.0f }, { 1.0f, 1.0f, 0.0f } },
+    { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f } },
+    
+    { { 0.5f,  0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
+    { { 0.5f, -0.5f, 0.0f }, { 0.0f, 0.0f, 1.0f } },
+    { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f } },
 };
 
 static int CompileShader(GLuint *Shader, const char *VertexShader, const char *FragmentShader) {
@@ -153,6 +202,18 @@ static int CompileShader(GLuint *Shader, const char *VertexShader, const char *F
     return 0;
 }
 
+static int LoadShader(GLuint *Shader, const char *VertexPath, const char *FragmentPath) {
+    char *VertexCode = ReadFile(VertexPath);
+    char *FragmentCode = ReadFile(FragmentPath);
+    
+    int Error = CompileShader(Shader, VertexCode, FragmentCode);
+    
+    free(VertexCode);
+    free(FragmentCode);
+    
+    return Error;
+}
+
 typedef struct {
     Sint16 L;
     Sint16 R;
@@ -183,24 +244,8 @@ static void MyAudioCallback(void *Userdata, Uint8 *Stream, int Len) {
 }
 
 int main(void) {
-    if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if(SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
-        return -1;
-    }
-    
-    audio_data Audio = {0};
-    Audio.Freq = 48000;
-    
-    SDL_AudioSpec DesiredAudio = {0}, ObtainedAudio = {0};
-    DesiredAudio.freq = 48000;
-    DesiredAudio.format = AUDIO_S16SYS;
-    DesiredAudio.channels = 2;
-    DesiredAudio.samples = 4096;
-    DesiredAudio.callback = MyAudioCallback;
-    DesiredAudio.userdata = &Audio;
-    SDL_AudioDeviceID AudioDevice = SDL_OpenAudioDevice(0, 0, &DesiredAudio, &ObtainedAudio, 0);
-    if(AudioDevice == 0) {
-        fprintf(stderr, "SDL_OpenAudioDevice: %s\n", SDL_GetError());
         return -1;
     }
     
@@ -234,7 +279,7 @@ int main(void) {
     }
     
     GLuint Shader;
-    if(CompileShader(&Shader, CodeVS, CodeFS)) {
+    if(LoadShader(&Shader, "default.vs", "default.fs")) {
         fprintf(stderr, "shader compilation failed\n");
         return -1;
     }
@@ -256,11 +301,25 @@ int main(void) {
     
     GLfloat ModelPosition[2] = {0};
     
-    SDL_PauseAudioDevice(AudioDevice, 0);
+    float DeltaTime = 0.0;
+    Uint32 LastTicks = SDL_GetTicks();
+    float Angle = 0.0f;
+    
+    float LastMouseX = 0.0f;
+    float LastMouseY = 0.0f;
+    float MouseX = 0.0f;
+    float MouseY = 0.0f;
+    
+    float AngleX = 0.0f;
+    float AngleY = 0.0f;
+    
+    int IsButtonDown = 0;
     
     int Running = 1;
     while (Running) {
         SDL_Event Event;
+        LastMouseX = MouseX;
+        LastMouseY = MouseY;
         while (SDL_PollEvent(&Event)) {
             switch (Event.type) {
             case SDL_QUIT:
@@ -269,25 +328,52 @@ int main(void) {
             case SDL_MOUSEBUTTONDOWN:
                 ModelPosition[0] = (2.0f*Event.button.x)/WindowWidth - 1.0f;
                 ModelPosition[1] = (-2.0f*Event.button.y)/WindowHeight + 1.0f;
+                IsButtonDown = 1;
+                break;
+            case SDL_MOUSEBUTTONUP:
+                IsButtonDown = 0;
+                break;
+            case SDL_MOUSEMOTION:
+                MouseX = Event.motion.x;
+                MouseY = Event.motion.y;
                 break;
             default:
                 break;
             }
         }
         
+        float DeltaMouseX = MouseX - LastMouseX;
+        float DeltaMouseY = MouseY - LastMouseY;
+        
+        if(IsButtonDown) {
+            AngleX += 0.004f*DeltaMouseY;
+            AngleY += 0.004f*DeltaMouseX;
+        }
+        
+        std::cout << DeltaMouseX << std::endl;
+        
         glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
         glCheck(glClear(GL_COLOR_BUFFER_BIT));
         
+        Angle += DeltaTime;
+        m3 R = RotationX(AngleX)*RotationY(AngleY);
+        
         glCheck(glUseProgram(Shader));
-        glCheck(glUniform2fv(glGetUniformLocation(Shader, "ModelP"), 1, ModelPosition));
+        //glCheck(glUniform2fv(glGetUniformLocation(Shader, "ModelP"), 1, ModelPosition));
+        glCheck(glUniformMatrix3fv(glGetUniformLocation(Shader, "R"), 1, GL_FALSE, R.data()));
         
         glCheck(glBindVertexArray(VAO));
-        glCheck(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+        glCheck(glDrawArrays(GL_TRIANGLES, 0, 6));
         glCheck(glBindVertexArray(0));
         
         glCheck(glUseProgram(0));
 
         SDL_GL_SwapWindow(Window);
+        
+        Uint32 CurrTicks = SDL_GetTicks();
+        DeltaTime = ((CurrTicks - LastTicks)/1000.0f);
+        std::cout << DeltaTime << std::endl;
+        LastTicks = CurrTicks;
     }
     
     SDL_GL_DeleteContext(Context);
