@@ -75,8 +75,10 @@ static void CheckOpenGL(const char *CallStr) {
 
 typedef Eigen::Vector2f v2;
 typedef Eigen::Vector3f v3;
+typedef Eigen::Vector4f v4;
 typedef Eigen::Matrix2f m2;
 typedef Eigen::Matrix3f m3;
+typedef Eigen::Matrix4f m4;
 
 static m2 Rotation(float Angle) {
     v2 X(cosf(Angle), sinf(Angle));
@@ -123,6 +125,57 @@ static m3 RotationZ(float Angle) {
     return R;
 }
 
+static m4 M4(m3 M, v3 T=v3(0.0, 0.0, 0.0)) {
+    v4 X(1.0f, 0.0f, 0.0f, 0.0f);
+    v4 Y(0.0f, 1.0f, 0.0f, 0.0f);
+    v4 Z(0.0f, 0.0f, 1.0f, 0.0f);
+    v4 W(T[0], T[1], T[2], 1.0f);
+    
+    m4 Result;
+    Result << X, Y, Z, W;
+    
+    Result(0, 0) = M(0, 0);
+    Result(0, 1) = M(0, 1);
+    Result(0, 2) = M(0, 2);
+    Result(1, 0) = M(1, 0);
+    Result(1, 1) = M(1, 1);
+    Result(1, 2) = M(1, 2);
+    Result(2, 0) = M(2, 0);
+    Result(2, 1) = M(2, 1);
+    Result(2, 2) = M(2, 2);
+    return Result;
+}
+
+static m4 Translation(v3 T) {
+    m4 Result = m4::Identity();
+    Result(0, 3) = T[0];
+    Result(1, 3) = T[1];
+    Result(2, 3) = T[2];
+    return Result;
+}
+
+static m3 Scale(float S) {
+    m3 Result = S*m3::Identity();
+    return Result;
+}
+
+static m4 Perspective(float FoVY, float WoH, float N, float F) {
+    m4 Result;
+    
+    float T = tanf(FoVY/2.0f);
+    float SX = 1.0f/(T*WoH);
+    float SY = 1.0f/T;
+    float A = (N + F)/(N - F);
+    float B = 2.0f*N*F/(N - F);
+    
+    Result <<
+    SX,   0.0f,  0.0f, 0.0f,
+    0.0f,   SY,  0.0f, 0.0f,
+    0.0f, 0.0f,     A,    B,
+    0.0f, 0.0f, -1.0f, 0.0f;
+    return Result;
+}
+
 struct vertex {
     v3 Position;
     v3 Color;
@@ -148,6 +201,14 @@ static vertex MeshData[] = {
     { { 0.5f,  0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
     { { 0.5f, -0.5f, 0.0f }, { 0.0f, 0.0f, 1.0f } },
     { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f, 0.0f } },
+    
+    { { 5.0f,  -1.0f, 5.0f }, { 1.0f, 0.0f, 0.0f } },
+    { { -5.0f, -1.0f, 5.0f }, { 1.0f, 1.0f, 0.0f } },
+    { { -5.0f, -1.0f, -5.0f }, { 0.0f, 1.0f, 0.0f } },
+    
+    { { 5.0f,  -1.0f, 5.0f }, { 1.0f, 0.0f, 0.0f } },
+    { { 5.0f, -1.0f, -5.0f }, { 0.0f, 0.0f, 1.0f } },
+    { { -5.0f, -1.0f, -5.0f }, { 0.0f, 1.0f, 0.0f } },
 };
 
 static int CompileShader(GLuint *Shader, const char *VertexShader, const char *FragmentShader) {
@@ -298,6 +359,7 @@ int main(int, char **) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     
     glCheck(glEnable(GL_FRAMEBUFFER_SRGB));
+    glEnable(GL_DEPTH_TEST);
     
     GLfloat ModelPosition[2] = {0};
     
@@ -314,6 +376,7 @@ int main(int, char **) {
     float AngleY = 0.0f;
     
     int IsButtonDown = 0;
+    float Zoom = 0.4f;
     
     int Running = 1;
     while (Running) {
@@ -337,6 +400,13 @@ int main(int, char **) {
                 MouseX = Event.motion.x;
                 MouseY = Event.motion.y;
                 break;
+            case SDL_MOUSEWHEEL:
+                if(Event.wheel.y < 0) {
+                    Zoom *= 1.1f;
+                } else if(Event.wheel.y > 0) {
+                    Zoom /= 1.1f;
+                }
+                break;
             default:
                 break;
             }
@@ -346,24 +416,30 @@ int main(int, char **) {
         float DeltaMouseY = MouseY - LastMouseY;
         
         if(IsButtonDown) {
-            AngleX += 0.004f*DeltaMouseY;
-            AngleY += 0.004f*DeltaMouseX;
+            AngleX -= 0.004f*DeltaMouseY;
+            AngleY -= 0.004f*DeltaMouseX;
         }
         
-        std::cout << DeltaMouseX << std::endl;
-        
         glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
-        glCheck(glClear(GL_COLOR_BUFFER_BIT));
+        glCheck(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
         
         Angle += DeltaTime;
         m3 R = RotationX(AngleX)*RotationY(AngleY);
+        m4 R4 = M4(Scale(0.6));//M4(R, v3(0.1, 0.0, 0.0));
+        
+        float CameraRadius = 6.0f;
+        m4 C = M4(Scale(Zoom))*M4(RotationY(AngleY))*M4(RotationX(AngleX))*Translation(v3(0.0f, 0.0f, CameraRadius));
+        m4 V = Translation(v3(0.0f, 0.0f, -CameraRadius))*M4(RotationX(-AngleX))*M4(RotationY(-AngleY))*M4(Scale(1.0f/Zoom));
+        m4 P = Perspective(1.39626, WindowWidth/(float)WindowHeight, 0.1f, 100.0f);
         
         glCheck(glUseProgram(Shader));
         //glCheck(glUniform2fv(glGetUniformLocation(Shader, "ModelP"), 1, ModelPosition));
-        glCheck(glUniformMatrix3fv(glGetUniformLocation(Shader, "R"), 1, GL_FALSE, R.data()));
+        glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "R"), 1, GL_FALSE, R4.data()));
+        glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatV"), 1, GL_FALSE, V.data()));
+        glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatP"), 1, GL_FALSE, P.data()));
         
         glCheck(glBindVertexArray(VAO));
-        glCheck(glDrawArrays(GL_TRIANGLES, 0, 6));
+        glCheck(glDrawArrays(GL_TRIANGLES, 0, 12));
         glCheck(glBindVertexArray(0));
         
         glCheck(glUseProgram(0));
@@ -372,7 +448,7 @@ int main(int, char **) {
         
         Uint32 CurrTicks = SDL_GetTicks();
         DeltaTime = ((CurrTicks - LastTicks)/1000.0f);
-        std::cout << DeltaTime << std::endl;
+        //std::cout << DeltaTime << std::endl;
         LastTicks = CurrTicks;
     }
     
