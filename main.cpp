@@ -4,6 +4,9 @@
 #include "SDL.h"
 #include "glad/glad.h"
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "tinyobjloader/tiny_obj_loader.h"
+
 #include <iostream>
 
 #define ArrayCount(X) (sizeof(X)/sizeof(*X))
@@ -79,6 +82,10 @@ typedef Eigen::Vector4f v4;
 typedef Eigen::Matrix2f m2;
 typedef Eigen::Matrix3f m3;
 typedef Eigen::Matrix4f m4;
+
+#include <stdint.h>
+typedef uint32_t u32;
+typedef uint64_t u64;
 
 static m2 Rotation(float Angle) {
     v2 X(cosf(Angle), sinf(Angle));
@@ -178,7 +185,7 @@ static m4 Perspective(float FoVY, float WoH, float N, float F) {
 
 struct vertex {
     v3 Position;
-    v3 Color;
+    v3 Normal;
 };
 
 static char *ReadFile(const char *FileName) {
@@ -193,6 +200,7 @@ static char *ReadFile(const char *FileName) {
     return Bytes;
 }
 
+#if 0
 static vertex MeshData[] = {
     { { 0.5f,  0.5f, 0.0f }, { 1.0f, 0.0f, 0.0f } },
     { { -0.5f,  0.5f, 0.0f }, { 1.0f, 1.0f, 0.0f } },
@@ -210,6 +218,7 @@ static vertex MeshData[] = {
     { { 5.0f, -1.0f, -5.0f }, { 0.0f, 0.0f, 1.0f } },
     { { -5.0f, -1.0f, -5.0f }, { 0.0f, 1.0f, 0.0f } },
 };
+#endif
 
 static int CompileShader(GLuint *Shader, const char *VertexShader, const char *FragmentShader) {
     int Success0;
@@ -304,6 +313,138 @@ static void MyAudioCallback(void *Userdata, Uint8 *Stream, int Len) {
     Audio->SamplesDone += SampleCount;
 }
 
+struct mesh_triangle {
+    u64 PositionIndices[3];
+    u64 NormalIndices[3];
+};
+
+struct mesh {
+    v3 *Positions;
+    v3 *Normals;
+    
+    mesh_triangle *Triangles;
+    
+    u64 PositionCount;
+    u64 NormalCount;
+    
+    u64 TriangleCount;
+    
+    GLuint VAO, VBO;
+};
+
+static void MeshToOpenGL(mesh *Mesh) {
+    glGenBuffers(1, &Mesh->VBO);
+    glGenVertexArrays(1, &Mesh->VAO);
+    
+    glBindVertexArray(Mesh->VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, Mesh->VBO);
+    
+    u64 ByteCount = Mesh->TriangleCount*3*sizeof(vertex);
+    glBufferData(GL_ARRAY_BUFFER, ByteCount, 0, GL_STATIC_DRAW);
+    
+    vertex *Vertices = (vertex *)glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+    for(u64 I = 0; I < Mesh->TriangleCount; ++I) {
+        mesh_triangle Triangle = Mesh->Triangles[I];
+        for(u64 J = 0; J < 3; ++J) {
+            vertex Vertex;
+            Vertex.Position = Mesh->Positions[Triangle.PositionIndices[J]];
+            Vertex.Normal = Mesh->Normals[Triangle.NormalIndices[J]];
+            
+            *Vertices++ = Vertex;
+        }
+    }
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+    
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(GLfloat), (void *)(0));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(GLfloat), (void *)(3*sizeof(GLfloat)));
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+static void RenderMesh(mesh *Mesh, m4 MatM, v4 Color, GLuint Shader) {
+    glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatM"), 1, GL_FALSE, MatM.data()));
+    glCheck(glUniform4fv(glGetUniformLocation(Shader, "Color"), 1, Color.data()));
+    
+    glCheck(glBindVertexArray(Mesh->VAO));
+    glCheck(glDrawArrays(GL_TRIANGLES, 0, 3*Mesh->TriangleCount));
+    glCheck(glBindVertexArray(0));
+}
+
+static int LoadMesh(mesh *OutMesh, const char *FileName) {
+    tinyobj::ObjReaderConfig reader_config;
+    reader_config.mtl_search_path = "./"; // Path to material files
+    
+    tinyobj::ObjReader reader;
+    
+    if (!reader.ParseFromFile(FileName, reader_config)) {
+        if (!reader.Error().empty()) {
+          std::cerr << "TinyObjReader: " << reader.Error();
+        }
+        exit(1);
+    }
+    
+    if (!reader.Warning().empty()) {
+        std::cout << "TinyObjReader: " << reader.Warning();
+        return 1;
+    }
+    
+    auto& Attrib = reader.GetAttrib();
+    
+    const std::vector<tinyobj::shape_t> &Shapes = reader.GetShapes();
+    if(Shapes.size() > 1) {
+        return 1;
+    }
+    std::cout << "Loading file " << FileName << " with shape " << Shapes[0].name << " ..." << std::endl;
+    
+    for(size_t I = 0; I < Shapes[0].mesh.num_face_vertices.size(); ++I) {
+        if(Shapes[0].mesh.num_face_vertices[I] != 3) {
+            std::cout << "Only triangles supported" << std::endl;
+            return 1;
+        }
+    }
+    
+    mesh Mesh = {0};
+    Mesh.PositionCount = Attrib.vertices.size()/3;
+    Mesh.NormalCount = Attrib.normals.size()/3;
+    Mesh.TriangleCount = Shapes[0].mesh.num_face_vertices.size();
+    
+    Mesh.Positions = (v3 *)malloc(sizeof(v3)*Mesh.PositionCount);
+    Mesh.Normals = (v3 *)malloc(sizeof(v3)*Mesh.NormalCount);
+    Mesh.Triangles = (mesh_triangle *)malloc(sizeof(mesh_triangle)*Mesh.TriangleCount);
+    
+    for(u64 I = 0; I < Mesh.PositionCount; ++I) {
+        v3 Position(Attrib.vertices[3*I + 0],
+                   Attrib.vertices[3*I + 1],
+                   Attrib.vertices[3*I + 2]);
+        Mesh.Positions[I] = Position;
+    }
+    
+    for(u64 I = 0; I < Mesh.NormalCount; ++I) {
+        v3 Normal(Attrib.normals[3*I + 0],
+                   Attrib.normals[3*I + 1],
+                   Attrib.normals[3*I + 2]);
+        Mesh.Normals[I] = Normal;
+    }
+    
+    for(size_t TriangleIndex = 0; TriangleIndex < Mesh.TriangleCount; ++TriangleIndex) {
+        mesh_triangle Triangle = {0};
+        
+        for(size_t I = 0; I < 3; ++I) {
+            tinyobj::index_t ObjIndex = Shapes[0].mesh.indices[3*TriangleIndex + I];
+            
+            Triangle.PositionIndices[I] = ObjIndex.vertex_index;
+            Triangle.NormalIndices[I] = ObjIndex.normal_index;
+        }
+        
+        Mesh.Triangles[TriangleIndex] = Triangle;
+    }
+    
+    *OutMesh = Mesh;
+    
+    return 0;
+}
+
 int main(int, char **) {
     if(SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -345,6 +486,7 @@ int main(int, char **) {
         return -1;
     }
     
+#if 0
     GLuint VAO, VBO;
     glGenBuffers(1, &VBO);
     glGenVertexArrays(1, &VAO);
@@ -357,11 +499,18 @@ int main(int, char **) {
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+#endif
     
     glCheck(glEnable(GL_FRAMEBUFFER_SRGB));
     glEnable(GL_DEPTH_TEST);
     
     GLfloat ModelPosition[2] = {0};
+    
+    mesh Meshes[2];
+    LoadMesh(Meshes + 0, "cube.obj");
+    LoadMesh(Meshes + 1, "plane.obj");
+    MeshToOpenGL(Meshes + 0);
+    MeshToOpenGL(Meshes + 1);
     
     float DeltaTime = 0.0;
     Uint32 LastTicks = SDL_GetTicks();
@@ -420,7 +569,7 @@ int main(int, char **) {
             AngleY -= 0.004f*DeltaMouseX;
         }
         
-        glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+        glClearColor(0.68f, 0.76f, 0.99f, 1.0f);
         glCheck(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
         
         Angle += DeltaTime;
@@ -438,9 +587,14 @@ int main(int, char **) {
         glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatV"), 1, GL_FALSE, V.data()));
         glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatP"), 1, GL_FALSE, P.data()));
         
-        glCheck(glBindVertexArray(VAO));
-        glCheck(glDrawArrays(GL_TRIANGLES, 0, 12));
-        glCheck(glBindVertexArray(0));
+        v3 LightDir(0.2f, -1.0f, 0.1f);
+        glCheck(glUniform3fv(glGetUniformLocation(Shader, "LightDir"), 1, LightDir.data()));
+        
+        m4 CubeMatM = Translation(v3(0.0f, 0.0f, 0.0f));
+        m4 PlaneMatM = Translation(v3(0.0f, -1.2f, 0.0f))*M4(Scale(10.0f));
+        
+        RenderMesh(Meshes + 0, CubeMatM, v4(1.0f, 1.0f, 1.0f, 1.0f), Shader);
+        RenderMesh(Meshes + 1, PlaneMatM, v4(0.04f, 0.04f, 0.06f, 1.0f), Shader);
         
         glCheck(glUseProgram(0));
 
