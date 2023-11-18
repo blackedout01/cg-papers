@@ -183,6 +183,17 @@ static m4 Perspective(float FoVY, float WoH, float N, float F) {
     return Result;
 }
 
+static m4 Orthogonal(float L, float R, float B, float T, float N, float F) {
+    m4 Result;
+    
+    Result <<
+    2.0f/(R - L), 0.0f, 0.0f, (L + R)/(L - R),
+    0.0f, 2.0f/(T - B), 0.0f, (B + T)/(B - T),
+    0.0f, 0.0f, -2.0/(F - N), (F + N)/(N - F),
+    0.0f, 0.0f, 0.0f, 1.0f;
+    return Result;
+}
+
 struct vertex {
     v3 Position;
     v3 Normal;
@@ -362,8 +373,9 @@ static void MeshToOpenGL(mesh *Mesh) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-static void RenderMesh(mesh *Mesh, m4 MatM, v4 Color, GLuint Shader) {
+static void RenderMesh(mesh *Mesh, m4 MatM, m3 MatN, v4 Color, GLuint Shader) {
     glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatM"), 1, GL_FALSE, MatM.data()));
+    glCheck(glUniformMatrix3fv(glGetUniformLocation(Shader, "MatN"), 1, GL_FALSE, MatN.data()));
     glCheck(glUniform4fv(glGetUniformLocation(Shader, "Color"), 1, Color.data()));
     
     glCheck(glBindVertexArray(Mesh->VAO));
@@ -485,7 +497,29 @@ int main(int, char **) {
         fprintf(stderr, "shader compilation failed\n");
         return -1;
     }
-    
+
+    GLuint LightShader;
+    if(LoadShader(&LightShader, "light.vs", "light.fs")) {
+        fprintf(stderr, "light shader compilation failed\n");
+        return -1;
+    }
+
+    GLuint DepthTex;
+    int DepthTexSize = 1024;
+    glCheck(glGenTextures(1, &DepthTex));
+    glCheck(glBindTexture(GL_TEXTURE_2D, DepthTex));
+    glCheck(glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, DepthTexSize, DepthTexSize, 0,  GL_DEPTH_COMPONENT,  GL_FLOAT, 0));
+    glCheck(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+    glCheck(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+    glCheck(glBindTexture(GL_TEXTURE_2D, 0));
+
+    GLuint LightFBO;
+    glCheck(glGenFramebuffers(1, &LightFBO));
+    glCheck(glBindFramebuffer(GL_FRAMEBUFFER, LightFBO));
+    glCheck(glDrawBuffer(GL_NONE));
+    glCheck(glReadBuffer(GL_NONE));
+    glCheck(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, DepthTex, 0));
+    glCheck(glBindFramebuffer(GL_FRAMEBUFFER, 0));
 #if 0
     GLuint VAO, VBO;
     glGenBuffers(1, &VBO);
@@ -569,9 +603,38 @@ int main(int, char **) {
             AngleY -= 0.004f*DeltaMouseX;
         }
         
+        m4 CubeMatM = Translation(v3(0.0f, 0.0f, 0.0f))*M4(RotationX(Angle));
+        m3 CubeMatN = RotationX(Angle);
+        m4 PlaneMatM = Translation(v3(0.0f, -1.2f, 0.0f))*M4(Scale(10.0f));
+        m3 PlaneMatN = m3::Identity();
+
+        float EdgeSize = 20.0f;
+        float LightPhi = 0.5f;
+        float LightTheta = -0.9f;
+        m3 LightRotation = RotationY(LightPhi)*RotationX(LightTheta);
+        v3 LightDir = LightRotation*v3(0.0f, 0.0f, -1.0f);
+        m4 LightV = M4(RotationX(-LightTheta)*RotationY(-LightPhi));
+        m4 LightP = Orthogonal(-EdgeSize, EdgeSize, -EdgeSize, EdgeSize, -EdgeSize, EdgeSize);
+        m4 LightPV = LightP*LightV;
+
+        glCheck(glBindFramebuffer(GL_FRAMEBUFFER, LightFBO));
+        glCheck(glClear(GL_DEPTH_BUFFER_BIT));
+        glViewport(0, 0, DepthTexSize, DepthTexSize);
+        glCheck(glUseProgram(LightShader));
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+
+        glCheck(glUniformMatrix4fv(glGetUniformLocation(LightShader, "MatPV"), 1, GL_FALSE, LightPV.data()));
+        RenderMesh(Meshes + 0, CubeMatM, CubeMatN, v4(1.0f, 1.0f, 1.0f, 1.0f), LightShader);
+        RenderMesh(Meshes + 1, PlaneMatM, PlaneMatN, v4(0.04f, 0.04f, 0.06f, 1.0f), LightShader);
+
+        glCheck(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+
         glClearColor(0.68f, 0.76f, 0.99f, 1.0f);
+        //glClearDepth(1.0f);
         glCheck(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
-        
+        glViewport(0, 0, WindowWidth, WindowHeight);
+
         Angle += DeltaTime;
         m3 R = RotationX(AngleX)*RotationY(AngleY);
         m4 R4 = M4(Scale(0.6));//M4(R, v3(0.1, 0.0, 0.0));
@@ -582,19 +645,22 @@ int main(int, char **) {
         m4 P = Perspective(1.39626, WindowWidth/(float)WindowHeight, 0.1f, 100.0f);
         
         glCheck(glUseProgram(Shader));
+        glCullFace(GL_BACK);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, DepthTex);
+        glCheck(glUniform1i(glGetUniformLocation(Shader, "LightDepthTex"), 0));
+
         //glCheck(glUniform2fv(glGetUniformLocation(Shader, "ModelP"), 1, ModelPosition));
         glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "R"), 1, GL_FALSE, R4.data()));
         glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatV"), 1, GL_FALSE, V.data()));
         glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "MatP"), 1, GL_FALSE, P.data()));
+        glCheck(glUniformMatrix4fv(glGetUniformLocation(Shader, "LightPV"), 1, GL_FALSE, LightPV.data()));
         
-        v3 LightDir(0.2f, -1.0f, 0.1f);
         glCheck(glUniform3fv(glGetUniformLocation(Shader, "LightDir"), 1, LightDir.data()));
         
-        m4 CubeMatM = Translation(v3(0.0f, 0.0f, 0.0f));
-        m4 PlaneMatM = Translation(v3(0.0f, -1.2f, 0.0f))*M4(Scale(10.0f));
-        
-        RenderMesh(Meshes + 0, CubeMatM, v4(1.0f, 1.0f, 1.0f, 1.0f), Shader);
-        RenderMesh(Meshes + 1, PlaneMatM, v4(0.04f, 0.04f, 0.06f, 1.0f), Shader);
+        RenderMesh(Meshes + 0, CubeMatM, CubeMatN, v4(1.0f, 1.0f, 1.0f, 1.0f), Shader);
+        RenderMesh(Meshes + 1, PlaneMatM, PlaneMatN, v4(0.04f, 0.04f, 0.06f, 1.0f), Shader);
         
         glCheck(glUseProgram(0));
 
